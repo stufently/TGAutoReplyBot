@@ -1,0 +1,11 @@
+services:
+  autosender:
+    image: registry.gitlab.9qw.ru:5005/9qw/autootvetchikchatgpt:staging
+    container_name: autosender
+    volumes:
+      # Монтируем директории с данными
+      - ./tdatas:/app/tdatas
+      - ./sessions:/app/sessions
+    env_file:
+      - .env  # Монтируем .env файл с переменными окружения
+    restart: unless-stopped

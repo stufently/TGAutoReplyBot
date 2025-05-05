@@ -1,0 +1,5 @@
+openai==1.70
+telethon==1.38.1
+opentele @ git+https://github.com/thedemons/opentele.git
+requests==2.32.3
+pysocks

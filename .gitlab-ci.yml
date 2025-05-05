@@ -1,0 +1,72 @@
+stages:
+  - release
+  - staging
+  - mirror          # новый этап для зеркалирования
+
+variables:
+  TEST_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHA"
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  GITHUB_REPO: "stufently/TGAutoReplyBot"   # GitHub‑репо
+  GITHUB_TOKEN: $GITHUB_TOKEN               # в Settings → CI/CD добавить secret variable GITHUB_TOKEN с PAT из GitHub
+
+image:
+  name: gcr.io/kaniko-project/executor:debug
+  entrypoint: [""]
+
+release:
+  stage: release
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "$CI_REGISTRY_IMAGE:latest"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - Dockerfile
+        - app/handler.py
+
+staging:
+  stage: staging
+  script:
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "$CI_REGISTRY_IMAGE:staging"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - Dockerfile
+        - app/handler.py
+
+mirror_to_github:
+  stage: mirror
+  image:
+    name: alpine/git:latest
+    entrypoint: [""]
+
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_NAME == "main"'
+      changes: ["**/*.py"]
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes: ["**/*.py"]
+
+  before_script:
+    - git config --global user.email "ci-runner@9qw.ru"
+    - git config --global user.name  "GitLab CI"
+    - git remote add github "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+    # убедимся, что у нас есть ветка main из origin
+    - git fetch origin main
+
+  script:
+    # 1. Переключаемся на orphan‑ветку
+    - git checkout --orphan mirror
+    # 2. Удаляем всё из индексa (но не из рабочей папки)
+    - git reset
+    # 3. Заносим в индекс текущее состояние origin/main
+    - git checkout origin/main -- .
+    # 4. Добавляем все файлы и делаем коммит
+    - git add -A
+    - git commit -m "CI mirror snapshot"
+    # 5. Пушим в GitHub, перезаписывая main
+    - git push --force github mirror:main

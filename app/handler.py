@@ -28,6 +28,7 @@ FORWARD_ENABLED     = int(os.environ.get("FORWARD_ENABLED", '1'))
 REPLY_COOLDOWN_DAYS     = int(os.environ.get("REPLY_COOLDOWN_DAYS", '90'))
 DELAYED_MESSAGE     = os.environ.get("DELAYED_MESSAGE", "Приветствую, вы определились по заказу? Может доставку или самовывоз на сегодня?")
 NON_TEXT_REPLY     = os.environ.get("NON_TEXT_REPLY", "Добрый день, напишите пожалуйста текстом, где вы находитесь и какой товар вас интересует?")
+FOLLOW_UP_MESSAGE     = os.environ.get("FOLLOW_UP_MESSAGE", "Если у вас ещё остались какие-то вопросы, смело задавайте")
 
 openai.api_key = OPENAI_API_KEY
 
@@ -228,18 +229,18 @@ async def process_dialogue(dialog, client, processed):
                 continue
 
             new_text_msgs = []
+            non_text_replied = False
             for m in msgs:
                 msg_time = m.date if m.date.tzinfo else m.date.replace(tzinfo=timezone.utc)
                 if m.sender_id == me.id or msg_time <= last_time:
                     continue
 
-                # --- Добавлено: обработка нетекстовых сообщений в цикле ---
-                if not m.text:
+                if not m.text and not non_text_replied:
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)
                     logger.info("Ответ на не-текстовое сообщение в цикле пользователю '%s'", user_name)
                     last_time = msg_time
-                    return
-                # --- Конец добавления ---
+                    non_text_replied = True
+                    continue
 
                 new_text_msgs.append(m)
 
@@ -259,7 +260,8 @@ async def process_dialogue(dialog, client, processed):
             else:
                 logger.info("За этот период для пользователя '%s' новых текстовых сообщений не обнаружено", user_name)
 
-        logger.info("Обработка диалога с пользователем '%s' завершена", user_name)
+        await client.client.send_message(dialog_id, FOLLOW_UP_MESSAGE)
+        logger.info("Обработка диалога с пользователем '%s' завершена, отправлено FOLLOW_UP_MESSAGE", user_name)
 
         # Далее код пересылки в группу (не изменялся)
         if FORWARD_ENABLED == 1:

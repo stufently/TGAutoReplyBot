@@ -1,6 +1,6 @@
 services:
   autosender:
-    image: registry.gitlab.9qw.ru:5005/9qw/autootvetchikchatgpt:staging
+    image: ghcr.io/stufently/tgautoreplybot:latest  # Образ из GHCR
     container_name: autosender
     volumes:
       # Монтируем директории с данными

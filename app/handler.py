@@ -25,6 +25,7 @@ CHATGPT_WAIT_LIMIT  = int(os.environ.get("CHATGPT_WAIT_LIMIT", 60))
 SEND_DELAYED        = int(os.environ.get("SEND_DELAYED", '1'))
 DELAY_MINUTES       = float(os.environ.get("DELAY_MINUTES", '60'))
 FORWARD_ENABLED     = int(os.environ.get("FORWARD_ENABLED", '1'))
+REPLY_COOLDOWN_DAYS     = int(os.environ.get("REPLY_COOLDOWN_DAYS", '90'))
 DELAYED_MESSAGE     = os.environ.get("DELAYED_MESSAGE", "Приветствую, вы определились по заказу? Может доставку или самовывоз на сегодня?")
 NON_TEXT_REPLY     = os.environ.get("NON_TEXT_REPLY", "Добрый день, напишите пожалуйста текстом, где вы находитесь и какой товар вас интересует?")
 
@@ -360,7 +361,7 @@ async def main():
                 continue
             my_msg = next((m for m in msgs if m.sender_id == me.id), None)
             if not my_msg or (datetime.now(timezone.utc) - (my_msg.date if my_msg.date.tzinfo 
-                              else my_msg.date.replace(tzinfo=timezone.utc)) > timedelta(days=30)):
+                              else my_msg.date.replace(tzinfo=timezone.utc)) > timedelta(days=REPLY_COOLDOWN_DAYS)):
                 if dialog.id not in processed:
                     processed.add(dialog.id)
                     asyncio.create_task(process_dialogue(dialog, client, processed))

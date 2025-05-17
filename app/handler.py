@@ -1,12 +1,15 @@
-#!/usr/bin/env python
 import asyncio, logging, os, json, hashlib, re
 from datetime import datetime, timedelta, timezone
-from telethon.tl.types import MessageService, MessageActionContactSignUp  # Импортируем MessageService для проверки типа сообщения
+from dotenv import load_dotenv
+
+load_dotenv()
+from telethon.tl.types import MessageService  # Импортируем MessageService для проверки типа сообщения
 
 import openai
 from telethon.errors import FloodWaitError, AuthKeyDuplicatedError
 from telethon.tl.types import User
 from tdata_session_exporter import authorize_client
+
 # Загрузка параметров из переменных окружения
 OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "api_key")
 ASSISTANT_ID        = os.environ.get("ASSISTANT_ID", "asst_vjWizQjt06NVFYtHwS6OX3b1")
@@ -27,9 +30,6 @@ DELAYED_MESSAGE     = os.environ.get("DELAYED_MESSAGE", "Приветствую,
 NON_TEXT_REPLY     = os.environ.get("NON_TEXT_REPLY", "Добрый день, напишите пожалуйста текстом, где вы находитесь и какой товар вас интересует?")
 FOLLOW_UP_MESSAGE     = os.environ.get("FOLLOW_UP_MESSAGE", "Если у вас ещё остались какие-то вопросы, смело задавайте")
 
-# Имя пользователя, которого нужно пропускать при обработке сообщений
-SKIP_USERNAME = "none"
-
 openai.api_key = OPENAI_API_KEY
 
 # Утилита для доступа к полям словаря
@@ -44,26 +44,6 @@ FORWARD_WAIT_TIME = int(os.environ.get("FORWARD_WAIT_TIME", 30))  # 30 мину�
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-# Настройка прокси для использования с tdata-session-exporter
-def setup_proxy_env():
-    try:
-        addr, port, username, password = PROXIES.split(",")[0].strip().split(":")
-        logger.info("Загружен прокси %s:%s", addr, port)
-        
-        # Устанавливаем переменные окружения для tdata-session-exporter
-        os.environ["PROXY_TYPE"] = PROXY_TYPE
-        os.environ["PROXY_HOST"] = addr
-        os.environ["PROXY_PORT"] = port
-        os.environ["PROXY_USERNAME"] = username
-        os.environ["PROXY_PASSWORD"] = password
-        
-        return True
-    except Exception as e:
-        logger.error("Ошибка парсинга PROXIES: %s", e)
-        return False
-
-# Путь к директории tdata (используется библиотекой tdata-session-exporter)
-os.environ["TDATA_PATH"] = "tdatas/tdata/"
 
 # GPT-интеграция с кэшированием потоков
 threads_cache = {}
@@ -129,15 +109,10 @@ async def process_dialogue(dialog, client, processed):
             recent = await client.client.get_messages(dialog_id, limit=1)
             if recent:
                 m0 = recent[0]
-                if m0.sender_id != me.id:
-                    # 1) Игнорировать служебное сообщение о регистрации контакта
-                    if isinstance(m0, MessageService) and isinstance(m0.action, MessageActionContactSignUp):
-                        return  # не реагируем на «user joined to Telegram»
-                    # 2) Обычные нетекстовые сообщения
-                    if not m0.text:
-                        await client.client.send_message(dialog_id, NON_TEXT_REPLY)
-                        logger.info("Ответ на не-текстовое сообщение пользователю '%s'", user_name)
-                        return
+                if m0.sender_id != me.id and not m0.text:
+                    await client.client.send_message(dialog_id, NON_TEXT_REPLY)
+                    logger.info("Ответ на не-текстовое сообщение пользователю '%s'", user_name)
+                    return
         except Exception as e:
             logger.error("Ошибка при проверке нетекстовых сообщений: %s", e)
         # --- Конец добавления ---
@@ -192,9 +167,6 @@ async def process_dialogue(dialog, client, processed):
                 if m.sender_id == me.id or msg_time <= last_time:
                     continue
 
-                # Игнорируем join-сообщения
-                if isinstance(m, MessageService) and isinstance(m.action, MessageActionContactSignUp):
-                    continue  # просто пропускаем
                 if not m.text and not non_text_replied:
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)
                     logger.info("Ответ на не-текстовое сообщение в цикле пользователю '%s'", user_name)
@@ -287,41 +259,21 @@ async def process_dialogue(dialog, client, processed):
 # Основной цикл: авторизация, мониторинг и обработка диалогов
 async def main():
     logger.info("Приложение запущено")
-    if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"] or os.environ["OPENAI_API_KEY"] == "api_key":
-        logger.error("OPENAI_API_KEY не настроен в переменных окружения")
+    client = await authorize_client("example_tdata")
+    if not client:
+        logger.error("Ошибка авторизации")
         return
-
-    # Настраиваем прокси для tdata-session-exporter
-    setup_proxy_env()
-    
-    try:
-        # Используем новую библиотеку для авторизации
-        client = await authorize_client("telegram")
-
-        if not client:
-            logger.error("Ошибка авторизации")
-            return
-            
-        processed = set()
-        while True:
-            try:
-                dialogs = await client.client.get_dialogs(limit=DIALOGS_LIMIT, folder=0,
-                                                         ignore_pinned=True, ignore_migrated=True)
-                logger.info("Получено %d диалогов для мониторинга", len(dialogs))
-                
-                # Обработка диалогов
-                for dialog in dialogs:
-                    await process_dialogue(dialog, client, processed)
-                
-                # Ожидание перед следующей проверкой
-                await asyncio.sleep(MONITOR_INTERVAL)
-                
-            except Exception as e:
-                logger.error("Ошибка получения диалогов: %s", e)
-                await reconnect_if_disconnected(client)
-                await asyncio.sleep(MONITOR_INTERVAL)
-    except Exception as e:
-        logger.error("Ошибка в основном цикле: %s", e)
+    processed = set()
+    while True:
+        try:
+            dialogs = await client.client.get_dialogs(limit=DIALOGS_LIMIT, folder=0,
+                                                        ignore_pinned=True, ignore_migrated=True)
+            logger.info("Получено %d диалогов для мониторинга", len(dialogs))
+        except Exception as e:
+            logger.error("Ошибка получения диалогов: %s", e)
+            await reconnect_if_disconnected(client)
+            await asyncio.sleep(MONITOR_INTERVAL)
+            continue
         me = await client.client.get_me()
         for dialog in dialogs:
             # Только личные диалоги с реальными пользователями
@@ -335,11 +287,6 @@ async def main():
                 logger.info("Диалог с '%s' пропущен (нет непрочитанных сообщений)", getattr(dialog.entity, 'first_name', 'Неизвестно'))
                 continue
             user_name = getattr(dialog.entity, 'first_name', None) or getattr(dialog.entity, 'username', 'Неизвестно')
-            
-            if user_name.lower() == SKIP_USERNAME.lower():
-                logger.info("Диалог с пользователем '%s' пропущен (пользователь в списке пропуска)", user_name)
-                continue
-                
             logger.info("Мониторинг диалога с пользователем '%s'", user_name)
             try:
                 msgs = await client.client.get_messages(dialog.id, limit=CHECK_OLD_MESSAGES_LIMIT)
@@ -354,6 +301,7 @@ async def main():
                     asyncio.create_task(process_dialogue(dialog, client, processed))
                     logger.info("Начата обработка диалога с пользователем '%s'", user_name)
         await asyncio.sleep(DIALOGS_INTERVAL)
+
 if __name__ == "__main__":
     asyncio.run(main())
     

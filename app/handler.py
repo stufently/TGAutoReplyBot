@@ -112,7 +112,7 @@ async def process_dialogue(dialog, client, processed):
                 if m0.sender_id != me.id and not m0.text:
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)
                     logger.info("Ответ на не-текстовое сообщение пользователю '%s'", user_name)
-                    return
+                    continue
         except Exception as e:
             logger.error("Ошибка при проверке нетекстовых сообщений: %s", e)
         # --- Конец добавления ---

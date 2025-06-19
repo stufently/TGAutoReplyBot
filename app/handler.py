@@ -133,8 +133,8 @@ async def process_dialogue(dialog, client, processed):
             logger.error("Ошибка получения сообщений для начальной обработки диалога с '%s': %s", user_name, e)
             msgs = []
 
-        # Отбираем текстовые сообщения, отправленные клиентом
-        initial_client_msgs = [m for m in msgs if m.sender_id != me.id and m.text]
+        # Отбираем текстовые сообщения, отправленные клиентом (исключаем системные сообщения)
+        initial_client_msgs = [m for m in msgs if m.sender_id != me.id and m.text and not isinstance(m, MessageService)]
         if initial_client_msgs:
             initial_client_msgs.sort(key=lambda m: m.date)
             combined = "\n".join(m.text for m in initial_client_msgs)
@@ -164,6 +164,11 @@ async def process_dialogue(dialog, client, processed):
             for m in msgs:
                 msg_time = m.date if m.date.tzinfo else m.date.replace(tzinfo=timezone.utc)
                 if m.sender_id == me.id or msg_time <= last_time:
+                    continue
+                
+                # Пропускаем системные сообщения (joined telegram, и т.д.)
+                if isinstance(m, MessageService):
+                    logger.info("Пропущено системное сообщение для пользователя '%s'", user_name)
                     continue
 
                 if not m.text and not non_text_replied:
@@ -292,6 +297,7 @@ async def main():
             except Exception as e:
                 logger.error("Ошибка получения сообщений для диалога с '%s': %s", user_name, e)
                 continue
+            
             my_msg = next((m for m in msgs if m.sender_id == me.id), None)
             if not my_msg or (datetime.now(timezone.utc) - (my_msg.date if my_msg.date.tzinfo 
                               else my_msg.date.replace(tzinfo=timezone.utc)) > timedelta(days=REPLY_COOLDOWN_DAYS)):

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
-from telethon.tl.types import MessageService  # Импортируем MessageService для проверки типа сообщения
+from telethon.tl.types import MessageService  # Импортируем MessageService для проверки системных сообщений
 
 import openai
 from telethon.errors import FloodWaitError, AuthKeyDuplicatedError
@@ -43,6 +43,14 @@ FORWARD_WAIT_TIME = int(os.environ.get("FORWARD_WAIT_TIME", 30))  # 30 мину�
 # Настройка логгера (сообщения на русском)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
+
+def is_system_message(message):
+    """
+    Простая и надёжная проверка системных сообщений Telegram
+    """
+    # MessageService покрывает все системные сообщения в Telegram
+    # (joined, left, pinned, title changed, photo changed и т.д.)
+    return isinstance(message, MessageService)
 
 
 # GPT-интеграция с кэшированием потоков
@@ -109,7 +117,8 @@ async def process_dialogue(dialog, client, processed):
             recent = await client.client.get_messages(dialog_id, limit=1)
             if recent:
                 m0 = recent[0]
-                if m0.sender_id != me.id and not m0.text:
+                # Проверяем, что сообщение не от нас, не текстовое и не системное
+                if m0.sender_id != me.id and not m0.text and not is_system_message(m0):
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)
                     logger.info("Ответ на не-текстовое сообщение пользователю '%s'", user_name)
         except Exception as e:
@@ -134,7 +143,7 @@ async def process_dialogue(dialog, client, processed):
             msgs = []
 
         # Отбираем текстовые сообщения, отправленные клиентом (исключаем системные сообщения)
-        initial_client_msgs = [m for m in msgs if m.sender_id != me.id and m.text and not isinstance(m, MessageService)]
+        initial_client_msgs = [m for m in msgs if m.sender_id != me.id and m.text and not is_system_message(m)]
         if initial_client_msgs:
             initial_client_msgs.sort(key=lambda m: m.date)
             combined = "\n".join(m.text for m in initial_client_msgs)
@@ -167,7 +176,7 @@ async def process_dialogue(dialog, client, processed):
                     continue
                 
                 # Пропускаем системные сообщения (joined telegram, и т.д.)
-                if isinstance(m, MessageService):
+                if is_system_message(m):
                     logger.info("Пропущено системное сообщение для пользователя '%s'", user_name)
                     continue
 

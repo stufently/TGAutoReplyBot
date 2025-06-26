@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
-from telethon.tl.types import MessageService  # Импортируем MessageService для проверки системных сообщений
 
 import openai
 from telethon.errors import FloodWaitError, AuthKeyDuplicatedError
@@ -48,9 +47,9 @@ def is_system_message(message):
     """
     Простая и надёжная проверка системных сообщений Telegram
     """
-    # MessageService покрывает все системные сообщения в Telegram
+    # В Telethon системные сообщения помечены атрибутом service=True
     # (joined, left, pinned, title changed, photo changed и т.д.)
-    return isinstance(message, MessageService)
+    return getattr(message, 'service', False)
 
 
 # GPT-интеграция с кэшированием потоков

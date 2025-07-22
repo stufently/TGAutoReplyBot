@@ -49,7 +49,20 @@ def is_system_message(message):
     """
     # В Telethon системные сообщения помечены атрибутом service=True
     # (joined, left, pinned, title changed, photo changed и т.д.)
-    return getattr(message, 'service', False)
+    if getattr(message, 'service', False):
+        return True
+    
+    # Проверка на уведомления об упоминаниях в историях
+    if hasattr(message, 'text') and message.text and 'mentioned you in a story' in message.text:
+        return True
+    
+    # Проверка на истории (stories) - они имеют атрибут media с типом MessageMediaStory
+    if hasattr(message, 'media') and message.media:
+        media_type = type(message.media).__name__
+        if 'Story' in media_type or 'story' in media_type.lower():
+            return True
+    
+    return False
 
 
 # GPT-интеграция с кэшированием потоков

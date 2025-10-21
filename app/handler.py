@@ -1,47 +1,67 @@
-import asyncio, logging, os, json, hashlib, re
+import asyncio, logging, os, requests
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import openai
-from telethon.errors import FloodWaitError, AuthKeyDuplicatedError
+from openai import OpenAI
+from telethon.errors import FloodWaitError
 from telethon.tl.types import User
 from tdata_session_exporter import authorize_client
 
 # Загрузка параметров из переменных окружения
-OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "api_key")
-ASSISTANT_ID        = os.environ.get("ASSISTANT_ID", "asst_vjWizQjt06NVFYtHwS6OX3b1")
-PROXIES             = os.environ.get("PROXIES", "ansible.9qw.ru:8126:admin:password")
-PROXY_TYPE          = os.environ.get("PROXY_TYPE", "http")
-CHECK_OLD_MESSAGES_LIMIT      = int(os.environ.get("CHECK_OLD_MESSAGES_LIMIT", 20))
-MESSAGES_LIMIT      = int(os.environ.get("MESSAGES_LIMIT", 10))
-MONITOR_INTERVAL    = int(os.environ.get("MONITOR_INTERVAL", 30))
-DIALOGS_LIMIT       = int(os.environ.get("DIALOGS_LIMIT", 10))
-DIALOGS_INTERVAL    = int(os.environ.get("DIALOGS_INTERVAL", 10))
-CHATGPT_LIMIT       = int(os.environ.get("CHATGPT_LIMIT", 4))
-CHATGPT_WAIT_LIMIT  = int(os.environ.get("CHATGPT_WAIT_LIMIT", 60))
-SEND_DELAYED        = int(os.environ.get("SEND_DELAYED", '1'))
-DELAY_MINUTES       = float(os.environ.get("DELAY_MINUTES", '60'))
-FORWARD_ENABLED     = int(os.environ.get("FORWARD_ENABLED", '1'))
-REPLY_COOLDOWN_DAYS     = int(os.environ.get("REPLY_COOLDOWN_DAYS", '90'))
-DELAYED_MESSAGE     = os.environ.get("DELAYED_MESSAGE", "Приветствую, вы определились по заказу? Может доставку или самовывоз на сегодня?")
-NON_TEXT_REPLY     = os.environ.get("NON_TEXT_REPLY", "Добрый день, напишите пожалуйста текстом, где вы находитесь и какой товар вас интересует?")
-FOLLOW_UP_MESSAGE     = os.environ.get("FOLLOW_UP_MESSAGE", "Если у вас ещё остались какие-то вопросы, смело задавайте")
+OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "api_key")
+PROXIES             = os.getenv("PROXIES", "ansible.9qw.ru:8126:admin:password")
+PROXY_TYPE          = os.getenv("PROXY_TYPE", "http")
+CHECK_OLD_MESSAGES_LIMIT      = int(os.getenv("CHECK_OLD_MESSAGES_LIMIT", 20))
+MESSAGES_LIMIT      = int(os.getenv("MESSAGES_LIMIT", 10))
+MONITOR_INTERVAL    = int(os.getenv("MONITOR_INTERVAL", 30))
+DIALOGS_LIMIT       = int(os.getenv("DIALOGS_LIMIT", 10))
+DIALOGS_INTERVAL    = int(os.getenv("DIALOGS_INTERVAL", 10))
+CHATGPT_LIMIT       = int(os.getenv("CHATGPT_LIMIT", 4))
+CHATGPT_WAIT_LIMIT  = int(os.getenv("CHATGPT_WAIT_LIMIT", 60))
+SEND_DELAYED        = int(os.getenv("SEND_DELAYED", '1'))
+DELAY_MINUTES       = float(os.getenv("DELAY_MINUTES", '60'))
+FORWARD_ENABLED     = int(os.getenv("FORWARD_ENABLED", '1'))
+REPLY_COOLDOWN_DAYS     = int(os.getenv("REPLY_COOLDOWN_DAYS", '90'))
+DELAYED_MESSAGE     = os.getenv("DELAYED_MESSAGE", "Приветствую, вы определились по заказу? Может доставку или самовывоз на сегодня?")
+NON_TEXT_REPLY     = os.getenv("NON_TEXT_REPLY", "Добрый день, напишите пожалуйста текстом, где вы находитесь и какой товар вас интересует?")
+FOLLOW_UP_MESSAGE     = os.getenv("FOLLOW_UP_MESSAGE", "Если у вас ещё остались какие-то вопросы, смело задавайте")
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1002510370326"))
+FORWARD_WAIT_TIME = int(os.getenv("FORWARD_WAIT_TIME", "30"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.txt")
+PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/combined_autootvetchik_latest.txt")
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2560"))
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-openai.api_key = OPENAI_API_KEY
+# Настройка логгера
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def load_system_prompt():
+    if not PROMPT_URL or not PROMPT_URL.strip():
+        logger.error("PROMPT_URL не задан — завершение работы")
+        raise RuntimeError("PROMPT_URL is required")
+    logger.info("Загрузка системного промпта из URL: %s", PROMPT_URL)
+    try:
+        response = requests.get(PROMPT_URL.strip(), timeout=10)
+        response.raise_for_status()
+        text = response.text
+        if not text or not text.strip():
+            raise ValueError("Промпт пустой")
+        logger.info("Системный промпт успешно загружен из URL: %s", PROMPT_URL)
+        return text
+    except Exception as e:
+        logger.error("Не удалось загрузить системный промпт из URL %s: %s", PROMPT_URL, e)
+        raise RuntimeError("SYSTEM_PROMPT is unavailable") from e
+SYSTEM_PROMPT = load_system_prompt()
 
 # Утилита для доступа к полям словаря
 class dotdict(dict):
     __getattr__ = dict.__getitem__
 
-# Дефолты для переменных 
-GROUP_CHAT_ID = -1002510370326  # ID группы для пересылки диалогов
-FORWARD_WAIT_TIME = int(os.environ.get("FORWARD_WAIT_TIME", 30))  # 30 минут
 
-# Настройка логгера (сообщения на русском)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger()
 
 def is_system_message(message):
     """
@@ -65,37 +85,55 @@ def is_system_message(message):
     return False
 
 
-# GPT-интеграция с кэшированием потоков
-threads_cache = {}
-thread_after = {}
+# Хранилище соответствия Telegram-диалога и Conversation в OpenAI
+conversations_cache = {}
 
-async def chat_with_openai(dialog_id, prompt):
+def _dialog_key(account_id: int, dialog_id: int) -> str:
+    return f"{account_id}:{dialog_id}"
+
+def _get_or_create_conversation(account_id: int, dialog_id: int) -> str:
+    """Получает существующий или создаёт новый conversation для диалога."""
+    key = _dialog_key(account_id, dialog_id)
+    
+    # Проверяем кэш
+    if key in conversations_cache:
+        return conversations_cache[key]
+    
+    # Создаём новый conversation
     try:
-        logger.info("Отправляем в ChatGPT для диалога %s: %s", dialog_id, prompt)
-        if dialog_id not in threads_cache:
-            threads_cache[dialog_id] = openai.beta.threads.create().id
-            logger.info("Создан поток %s для диалога %s", threads_cache[dialog_id], dialog_id)
-        openai.beta.threads.messages.create(thread_id=threads_cache[dialog_id],
-                                              role="user", content=prompt)
-        logger.info("Запрос отправлен в ChatGPT для диалога %s", dialog_id)
-        run = openai.beta.threads.runs.create(thread_id=threads_cache[dialog_id],
-                                               assistant_id=ASSISTANT_ID)
-        while True:
-            status = openai.beta.threads.runs.retrieve(
-                thread_id=threads_cache[dialog_id], run_id=run.id).status
-            if status in ["completed", "expired", "cancelled", "failed"]:
-                logger.info("Статус выполнения для диалога %s: %s", dialog_id, status)
-                break
-            await asyncio.sleep(1)
-        after = thread_after.get(threads_cache[dialog_id])
-        msgs = openai.beta.threads.messages.list(thread_id=threads_cache[dialog_id], before=after)
-        for msg in msgs.data:
-            if msg.role == "assistant":
-                thread_after[threads_cache[dialog_id]] = msg.id
-                logger.info("Получен ответ для диалога %s: %s", dialog_id, msg.content[0].text.value)
-                return msg.content[0].text.value
-        logger.info("Ответ не получен для диалога %s", dialog_id)
-        return "Нет ответа от ассистента."
+        conv = client.conversations.create()
+        conv_id = conv.id
+        conversations_cache[key] = conv_id
+        logger.info("Создан новый conversation %s для диалога %s", conv_id, dialog_id)
+        return conv_id
+    except Exception as e:
+        logger.error("Не удалось создать conversation для диалога %s: %s", dialog_id, e)
+        raise
+
+async def chat_with_openai(account_id, dialog_id, prompt):
+    try:
+        logger.info("Отправляем в Responses API для диалога %s: %s", dialog_id, prompt)
+        conv_id = _get_or_create_conversation(account_id, dialog_id)
+        
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            conversation=conv_id,
+            input=[
+                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+                {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
+            ],
+            max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
+        )
+        
+        text = getattr(resp, "output_text", "") or ""
+        if not text.strip():
+            logger.warning("Пустой output_text для диалога %s", dialog_id)
+            text = "Нет ответа."
+        else:
+            text = text.strip()
+            
+        logger.info("Получен ответ для диалога %s: %s", dialog_id, text)
+        return text
     except FloodWaitError as e:
         logger.warning("FloodWaitError в диалоге %s: ожидание %s секунд", dialog_id, e.seconds)
         await asyncio.sleep(e.seconds)
@@ -120,6 +158,15 @@ async def process_dialogue(dialog, client, processed):
         user_name = getattr(dialog.entity, 'first_name', None) or getattr(dialog.entity, 'username', 'Неизвестно')
         me = await client.client.get_me()
         logger.info("Начало обработки диалога с пользователем '%s'", user_name)
+
+        # Создаём новый conversation для каждого диалога
+        try:
+            key = _dialog_key(me.id, dialog_id)
+            if key in conversations_cache:
+                del conversations_cache[key]
+            logger.info("Очищен кэш conversation для диалога %s", dialog_id)
+        except Exception as e:
+            logger.warning("Не удалось очистить кэш conversation для диалога %s: %s", dialog_id, e)
 
         # Проверка соединения перед обработкой
         await reconnect_if_disconnected(client)
@@ -159,7 +206,7 @@ async def process_dialogue(dialog, client, processed):
         if initial_client_msgs:
             initial_client_msgs.sort(key=lambda m: m.date)
             combined = "\n".join(m.text for m in initial_client_msgs)
-            reply = await chat_with_openai(dialog_id, combined)
+            reply = await chat_with_openai(me.id, dialog_id, combined)
             try:
                 await client.client.send_message(dialog_id, reply, parse_mode="html")
                 logger.info("Отправлено начальное сообщение пользователю '%s'", user_name)
@@ -205,7 +252,7 @@ async def process_dialogue(dialog, client, processed):
             if new_text_msgs:
                 new_text_msgs.sort(key=lambda m: m.date)
                 combined = "\n".join(m.text for m in new_text_msgs)
-                reply = await chat_with_openai(dialog_id, combined)
+                reply = await chat_with_openai(me.id, dialog_id, combined)
                 try:
                     await client.client.send_message(dialog_id, reply, parse_mode="html")
                     logger.info("Отправлено сообщение пользователю '%s'", user_name)

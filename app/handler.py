@@ -18,7 +18,7 @@ MESSAGES_LIMIT      = int(os.getenv("MESSAGES_LIMIT", 10))
 MONITOR_INTERVAL    = int(os.getenv("MONITOR_INTERVAL", 30))
 DIALOGS_LIMIT       = int(os.getenv("DIALOGS_LIMIT", 10))
 DIALOGS_INTERVAL    = int(os.getenv("DIALOGS_INTERVAL", 10))
-CHATGPT_LIMIT       = int(os.getenv("CHATGPT_LIMIT", 4))
+CHATGPT_LIMIT       = int(os.getenv("CHATGPT_LIMIT", 3))
 CHATGPT_WAIT_LIMIT  = int(os.getenv("CHATGPT_WAIT_LIMIT", 60))
 SEND_DELAYED        = int(os.getenv("SEND_DELAYED", '1'))
 DELAY_MINUTES       = float(os.getenv("DELAY_MINUTES", '60'))
@@ -29,9 +29,10 @@ NON_TEXT_REPLY     = os.getenv("NON_TEXT_REPLY", "Добрый день, нап�
 FOLLOW_UP_MESSAGE     = os.getenv("FOLLOW_UP_MESSAGE", "Если у вас ещё остались какие-то вопросы, смело задавайте")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1002510370326"))
 FORWARD_WAIT_TIME = int(os.getenv("FORWARD_WAIT_TIME", "30"))
+INITIAL_WAIT_TIME = int(os.getenv("INITIAL_WAIT_TIME", "60"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.txt")
-PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/combined_autootvetchik_latest.txt")
+PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/link")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2560"))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -192,9 +193,26 @@ async def process_dialogue(dialog, client, processed):
                 schedule=datetime.now() + timedelta(minutes=DELAY_MINUTES)
             )
             logger.info("Отправка отложенного сообщения")
+        
+        # Отправляем FOLLOW_UP_MESSAGE с задержкой
+        follow_up_delay = INITIAL_WAIT_TIME/60 + CHATGPT_WAIT_LIMIT * CHATGPT_LIMIT/60
+        await client.client.send_message(
+            dialog_id,
+            FOLLOW_UP_MESSAGE,
+            schedule=datetime.now() + timedelta(minutes=follow_up_delay)
+        )
+        logger.info("Отправка отложенного FOLLOW_UP_MESSAGE через %s минут", follow_up_delay)
 
-        # Ждём несколько секунд, чтобы получить начальные сообщения от клиента
-        await asyncio.sleep(5)
+        # Помечаем сообщения как прочитанные сразу
+        try:
+            await client.client.send_read_acknowledge(dialog_id)
+            logger.info("Сообщения помечены как прочитанные для пользователя '%s'", user_name)
+        except Exception as e:
+            logger.warning("Не удалось пометить сообщения как прочитанные: %s", e)
+        
+        # Ждём указанное время, чтобы получить все сообщения от клиента
+        logger.info("Ожидание %d секунд перед ответом для пользователя '%s'", INITIAL_WAIT_TIME, user_name)
+        await asyncio.sleep(INITIAL_WAIT_TIME)
         try:
             msgs = await client.client.get_messages(dialog_id, limit=MESSAGES_LIMIT)
         except Exception as e:
@@ -264,8 +282,7 @@ async def process_dialogue(dialog, client, processed):
             else:
                 logger.info("За этот период для пользователя '%s' новых текстовых сообщений не обнаружено", user_name)
 
-        await client.client.send_message(dialog_id, FOLLOW_UP_MESSAGE)
-        logger.info("Обработка диалога с пользователем '%s' завершена, отправлено FOLLOW_UP_MESSAGE", user_name)
+        logger.info("Обработка диалога с пользователем '%s' завершена", user_name)
 
         # Далее код пересылки в группу (не изменялся)
         if FORWARD_ENABLED == 1:

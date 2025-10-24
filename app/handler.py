@@ -32,7 +32,7 @@ FORWARD_WAIT_TIME = int(os.getenv("FORWARD_WAIT_TIME", "30"))
 INITIAL_WAIT_TIME = int(os.getenv("INITIAL_WAIT_TIME", "60"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.txt")
-PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/link")
+PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/link.txt")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2560"))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -56,6 +56,54 @@ def load_system_prompt():
     except Exception as e:
         logger.error("Не удалось загрузить системный промпт из URL %s: %s", PROMPT_URL, e)
         raise RuntimeError("SYSTEM_PROMPT is unavailable") from e
+
+def update_system_prompt(dialog_id, user_name):
+    """
+    Обновляет системный промпт для нового диалога с проверками и логированием
+    """
+    global SYSTEM_PROMPT
+    logger.info("Обновление системного промпта для диалога %s с пользователем '%s'", dialog_id, user_name)
+    
+    if not PROMPT_URL or not PROMPT_URL.strip():
+        logger.warning("PROMPT_URL не задан - пропускаем обновление промпта для диалога %s", dialog_id)
+        return False
+    
+    try:
+        logger.info("Загружаем новый промпт из URL: %s для диалога %s", PROMPT_URL, dialog_id)
+        response = requests.get(PROMPT_URL.strip(), timeout=10)
+        response.raise_for_status()
+        
+        new_prompt = response.text
+        if not new_prompt or not new_prompt.strip():
+            logger.warning("Загруженный промпт пустой для диалога %s - оставляем текущий промпт", dialog_id)
+            return False
+        
+        # Дополнительная проверка на минимальную длину промпта
+        if len(new_prompt.strip()) < 10:
+            logger.warning("Загруженный промпт слишком короткий (%d символов) для диалога %s - оставляем текущий промпт", 
+                          len(new_prompt.strip()), dialog_id)
+            return False
+        
+        old_prompt_length = len(SYSTEM_PROMPT) if SYSTEM_PROMPT else 0
+        SYSTEM_PROMPT = new_prompt.strip()
+        new_prompt_length = len(SYSTEM_PROMPT)
+        
+        logger.info("Системный промпт успешно обновлен для диалога %s с пользователем '%s' (длина: %d -> %d символов)", 
+                   dialog_id, user_name, old_prompt_length, new_prompt_length)
+        return True
+        
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при загрузке промпта для диалога %s - оставляем текущий промпт", dialog_id)
+        return False
+    except requests.exceptions.ConnectionError:
+        logger.error("Ошибка подключения при загрузке промпта для диалога %s - оставляем текущий промпт", dialog_id)
+        return False
+    except requests.exceptions.HTTPError as e:
+        logger.error("HTTP ошибка %s при загрузке промпта для диалога %s - оставляем текущий промпт", e.response.status_code, dialog_id)
+        return False
+    except Exception as e:
+        logger.error("Неожиданная ошибка при обновлении промпта для диалога %s: %s - оставляем текущий промпт", dialog_id, e)
+        return False
 SYSTEM_PROMPT = load_system_prompt()
 
 # Утилита для доступа к полям словаря
@@ -159,6 +207,13 @@ async def process_dialogue(dialog, client, processed):
         user_name = getattr(dialog.entity, 'first_name', None) or getattr(dialog.entity, 'username', 'Неизвестно')
         me = await client.client.get_me()
         logger.info("Начало обработки диалога с пользователем '%s'", user_name)
+        
+        # Обновляем системный промпт для каждого нового диалога
+        prompt_updated = update_system_prompt(dialog_id, user_name)
+        if prompt_updated:
+            logger.info("Промпт обновлен для диалога %s с пользователем '%s'", dialog_id, user_name)
+        else:
+            logger.info("Промпт НЕ обновлен для диалога %s с пользователем '%s' - используем текущий", dialog_id, user_name)
 
         # Создаём новый conversation для каждого диалога
         try:

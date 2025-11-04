@@ -34,6 +34,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.txt")
 PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/link.txt")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2560"))
+OPENAI_RETRY_COUNT = int(os.getenv("OPENAI_RETRY_COUNT", "3"))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Настройка логгера
@@ -160,36 +161,38 @@ def _get_or_create_conversation(account_id: int, dialog_id: int) -> str:
         raise
 
 async def chat_with_openai(account_id, dialog_id, prompt):
-    try:
-        logger.info("Отправляем в Responses API для диалога %s: %s", dialog_id, prompt)
-        conv_id = _get_or_create_conversation(account_id, dialog_id)
-        
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            conversation=conv_id,
-            input=[
-                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
-            ],
-            max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
-        )
-        
-        text = getattr(resp, "output_text", "") or ""
-        if not text.strip():
-            logger.warning("Пустой output_text для диалога %s", dialog_id)
-            text = "Нет ответа."
-        else:
-            text = text.strip()
+    for attempt in range(OPENAI_RETRY_COUNT):
+        try:
+            logger.info("Отправляем в Responses API для диалога %s: %s", dialog_id, prompt)
+            conv_id = _get_or_create_conversation(account_id, dialog_id)
             
-        logger.info("Получен ответ для диалога %s: %s", dialog_id, text)
-        return text
-    except FloodWaitError as e:
-        logger.warning("FloodWaitError в диалоге %s: ожидание %s секунд", dialog_id, e.seconds)
-        await asyncio.sleep(e.seconds)
-        return "FloodWaitError"
-    except Exception as e:
-        logger.error("Ошибка в chat_with_openai для диалога %s: %s", dialog_id, e)
-        return f"Ошибка: {e}"
+            resp = client.responses.create(
+                model=OPENAI_MODEL,
+                conversation=conv_id,
+                input=[
+                    {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+                    {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
+                ],
+                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
+            )
+            
+            text = getattr(resp, "output_text", "") or ""
+            if not text.strip():
+                logger.warning("Пустой output_text для диалога %s", dialog_id)
+                text = "Нет ответа."
+            else:
+                text = text.strip()
+                
+            if text == "Нет ответа." and attempt < OPENAI_RETRY_COUNT - 1:
+                logger.warning("Получен 'Нет ответа.', повторяем (попытка %d/%d)", attempt + 1, OPENAI_RETRY_COUNT)
+                await asyncio.sleep(2)
+                continue
+                
+            logger.info("Получен ответ для диалога %s: %s", dialog_id, text)
+            return text
+        except Exception as e:
+            logger.error("Ошибка в chat_with_openai для диалога %s: %s", dialog_id, e)
+            return f"Ошибка: {e}"
 
 async def reconnect_if_disconnected(client):
     if not client.client.is_connected():

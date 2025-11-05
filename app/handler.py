@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from openai import OpenAI
-from telethon.errors import FloodWaitError
 from telethon.tl.types import User
 from tdata_session_exporter import authorize_client
 

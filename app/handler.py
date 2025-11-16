@@ -172,7 +172,8 @@ async def chat_with_openai(account_id, dialog_id, prompt):
                     {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
                     {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
                 ],
-                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
+                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+                include=["reasoning.encrypted_content"]
             )
             
             text = getattr(resp, "output_text", "") or ""

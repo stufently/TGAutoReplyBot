@@ -32,7 +32,7 @@ INITIAL_WAIT_TIME = int(os.getenv("INITIAL_WAIT_TIME", "60"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.txt")
 PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/link.txt")
-OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2560"))
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "5120"))
 OPENAI_RETRY_COUNT = int(os.getenv("OPENAI_RETRY_COUNT", "3"))
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -178,8 +178,7 @@ async def chat_with_openai(account_id, dialog_id, prompt):
                     {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
                     {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
                 ],
-                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
-                include=["reasoning.encrypted_content"]
+                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
             )
             
             text = getattr(resp, "output_text", "") or ""

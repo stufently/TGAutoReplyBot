@@ -51,8 +51,6 @@ def load_system_prompt():
         text = response.text
         if not text or not text.strip():
             raise ValueError("Промпт пустой")
-        # Форматируем слово "сегодня" как жирное в промпте
-        text = re.sub(r'\b(сегодня)\b', r'<b>\1</b>', text, flags=re.IGNORECASE)
         logger.info("Системный промпт успешно загружен и отформатирован из URL: %s", PROMPT_URL)
         return text
     except Exception as e:

@@ -161,10 +161,6 @@ def _get_or_create_conversation(account_id: int, dialog_id: int) -> str:
         logger.error("Не удалось создать conversation для диалога %s: %s", dialog_id, e)
         raise
 
-def format_text_for_telegram(text):
-    text = re.sub(r'\b(сегодня)\b', r'<b>\1</b>', text, flags=re.IGNORECASE)
-    return text
-
 async def chat_with_openai(account_id, dialog_id, prompt):
     for attempt in range(OPENAI_RETRY_COUNT):
         try:
@@ -193,7 +189,6 @@ async def chat_with_openai(account_id, dialog_id, prompt):
                 await asyncio.sleep(2)
                 continue
 
-            text = format_text_for_telegram(text)
             logger.info("Получен ответ для диалога %s: %s", dialog_id, text)
             return text
         except Exception as e:

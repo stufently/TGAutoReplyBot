@@ -283,7 +283,7 @@ async def process_dialogue(dialog, client, processed):
             combined = "\n".join(m.text for m in initial_client_msgs)
             reply = await chat_with_openai(me.id, dialog_id, combined)
             try:
-                await client.client.send_message(dialog_id, reply, parse_mode="html")
+                await client.client.send_message(dialog_id, reply, parse_mode="markdown")
                 logger.info("Отправлено начальное сообщение пользователю '%s'", user_name)
             except Exception as e:
                 logger.error("Ошибка отправки начального сообщения пользователю '%s': %s", user_name, e)
@@ -329,7 +329,7 @@ async def process_dialogue(dialog, client, processed):
                 combined = "\n".join(m.text for m in new_text_msgs)
                 reply = await chat_with_openai(me.id, dialog_id, combined)
                 try:
-                    await client.client.send_message(dialog_id, reply, parse_mode="html")
+                    await client.client.send_message(dialog_id, reply, parse_mode="markdown")
                     logger.info("Отправлено сообщение пользователю '%s'", user_name)
                 except Exception as e:
                     logger.error("Ошибка отправки сообщения пользователю '%s': %s", user_name, e)

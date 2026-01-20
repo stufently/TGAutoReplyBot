@@ -1,6 +1,10 @@
 import asyncio, logging, os, re, requests
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from urllib.parse import urlparse, parse_qs, unquote
+from io import BytesIO
+import pytesseract
+from PIL import Image
 
 load_dotenv()
 
@@ -112,6 +116,46 @@ class dotdict(dict):
 
 
 
+def extract_map_links(text):
+    if not text:
+        return []
+    patterns = [
+        r'https?://maps\.app\.goo\.gl/[A-Za-z0-9_-]+',
+        r'https?://goo\.gl/maps/[A-Za-z0-9_-]+',
+        r'https?://(?:www\.)?google\.[a-z.]+/maps[^\s]*',
+        r'https?://maps\.google\.[a-z.]+/[^\s]*',
+    ]
+    links = []
+    for pattern in patterns:
+        links.extend(re.findall(pattern, text, re.IGNORECASE))
+    cleaned = [re.sub(r'\?g_st=\w+$', '', link).rstrip('.,;:!?)>]') for link in links]
+    return list(set(cleaned))
+
+
+def resolve_google_maps_link(short_url):
+    try:
+        response = requests.head(short_url, allow_redirects=True, timeout=10)
+        parsed = urlparse(response.url)
+        params = parse_qs(parsed.query)
+
+        if 'q' in params:
+            return unquote(params['q'][0]).replace('+', ' ')
+        if 'daddr' in params:
+            return unquote(params['daddr'][0]).replace('+', ' ')
+
+        place_match = re.search(r'/place/([^/@]+)', parsed.path)
+        if place_match:
+            return unquote(place_match.group(1)).replace('+', ' ')
+
+        coords_match = re.search(r'@?(-?\d+\.\d+),(-?\d+\.\d+)', response.url)
+        if coords_match:
+            return f"{coords_match.group(1)}, {coords_match.group(2)}"
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка при резолве ссылки {short_url}: {e}")
+        return None
+
+
 def is_system_message(message):
     """
     Простая и надёжная проверка системных сообщений Telegram
@@ -120,77 +164,174 @@ def is_system_message(message):
     # (joined, left, pinned, title changed, photo changed и т.д.)
     if getattr(message, 'service', False):
         return True
-    
+
     # Проверка на уведомления об упоминаниях в историях
     if hasattr(message, 'text') and message.text and 'mentioned you in a story' in message.text:
         return True
-    
+
     # Проверка на истории (stories) - они имеют атрибут media с типом MessageMediaStory
     if hasattr(message, 'media') and message.media:
         media_type = type(message.media).__name__
         if 'Story' in media_type or 'story' in media_type.lower():
             return True
-    
+
     return False
 
 
-# Хранилище соответствия Telegram-диалога и Conversation в OpenAI
-conversations_cache = {}
+def process_text_with_map_links(text):
+    if not text:
+        return None
+    map_links = extract_map_links(text)
+    if not map_links:
+        return None
+    processed = text
+    found = False
+    for link in map_links:
+        address = resolve_google_maps_link(link)
+        if address:
+            processed = processed.replace(link, f"[Локация: {address}]")
+            logger.info(f"Заменена ссылка на адрес: {address}")
+            found = True
+    return processed if found else None
+
+
+async def extract_text_from_image(client, message):
+    """
+    Извлекает текст из изображения в сообщении с помощью Tesseract OCR
+
+    Args:
+        client: Telegram клиент
+        message: Сообщение Telegram с фото
+
+    Returns:
+        str: Распознанный текст или None при ошибке
+    """
+    try:
+        if not message.photo:
+            return None
+
+        logger.info("Начинаем распознавание текста с изображения из сообщения %s", message.id)
+
+        # Скачиваем фото в память
+        photo_bytes = await client.download_media(message.photo, file=BytesIO())
+
+        if not photo_bytes:
+            logger.warning("Не удалось скачать фото из сообщения %s", message.id)
+            return None
+
+        # Открываем изображение с помощью Pillow
+        photo_bytes.seek(0)
+        image = Image.open(photo_bytes)
+
+        # Улучшаем изображение для OCR
+        # Увеличиваем размер в 2 раза для лучшего распознавания мелкого текста
+        width, height = image.size
+        image = image.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
+
+        # Конвертируем в оттенки серого
+        image = image.convert('L')
+
+        # Увеличиваем контраст
+        from PIL import ImageEnhance
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.0)
+
+        # Увеличиваем резкость
+        sharpness = ImageEnhance.Sharpness(image)
+        image = sharpness.enhance(2.0)
+
+        # Пробуем распознать с разными конфигурациями
+        configs = [
+            '--psm 3',  # Полностью автоматическое разбиение страницы
+            '--psm 6',  # Блок единообразного текста
+            '--psm 11', # Разреженный текст
+            '--psm 12', # Разреженный текст с OSD
+        ]
+
+        best_text = ""
+        for config in configs:
+            try:
+                text = pytesseract.image_to_string(image, lang='rus+eng', config=config)
+                if text and len(text.strip()) > len(best_text):
+                    best_text = text.strip()
+            except:
+                continue
+
+        if best_text:
+            logger.info("Текст успешно распознан (длина: %d символов): %s", len(best_text), best_text[:100])
+            return best_text
+        else:
+            logger.info("На изображении текст не обнаружен")
+            return None
+
+    except Exception as e:
+        logger.error("Ошибка при распознавании текста с изображения: %s", e)
+        return None
+
+
+# Хранилище истории сообщений для каждого диалога
+conversations_history = {}
 
 def _dialog_key(account_id: int, dialog_id: int) -> str:
     return f"{account_id}:{dialog_id}"
 
-def _get_or_create_conversation(account_id: int, dialog_id: int) -> str:
-    """Получает существующий или создаёт новый conversation для диалога."""
+def _get_or_create_history(account_id: int, dialog_id: int) -> list:
+    """Получает существующую историю или создаёт новую для диалога."""
     key = _dialog_key(account_id, dialog_id)
-    
+
     # Проверяем кэш
-    if key in conversations_cache:
-        return conversations_cache[key]
-    
-    # Создаём новый conversation
-    try:
-        conv = client.conversations.create()
-        conv_id = conv.id
-        conversations_cache[key] = conv_id
-        logger.info("Создан новый conversation %s для диалога %s", conv_id, dialog_id)
-        return conv_id
-    except Exception as e:
-        logger.error("Не удалось создать conversation для диалога %s: %s", dialog_id, e)
-        raise
+    if key in conversations_history:
+        return conversations_history[key]
+
+    # Создаём новую историю с системным промптом
+    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    conversations_history[key] = history
+    logger.info("Создана новая история для диалога %s", dialog_id)
+    return history
 
 async def chat_with_openai(account_id, dialog_id, prompt):
     for attempt in range(OPENAI_RETRY_COUNT):
         try:
-            logger.info("Отправляем в Responses API для диалога %s: %s", dialog_id, prompt)
-            conv_id = _get_or_create_conversation(account_id, dialog_id)
-            
-            resp = client.responses.create(
+            logger.info("Отправляем в ChatGPT для диалога %s: %s", dialog_id, prompt[:100])
+
+            # Получаем историю диалога
+            history = _get_or_create_history(account_id, dialog_id)
+
+            # Добавляем новое сообщение пользователя
+            history.append({"role": "user", "content": prompt})
+
+            # Отправляем запрос в ChatGPT
+            resp = client.chat.completions.create(
                 model=OPENAI_MODEL,
-                conversation=conv_id,
-                input=[
-                    {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                    {"role": "user",   "content": [{"type": "input_text", "text": prompt}]}
-                ],
-                max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS
+                messages=history,
+                max_completion_tokens=OPENAI_MAX_OUTPUT_TOKENS
             )
-            
-            text = getattr(resp, "output_text", "") or ""
-            if not text.strip():
-                logger.warning("Пустой output_text для диалога %s", dialog_id)
+
+            # Извлекаем ответ
+            text = resp.choices[0].message.content
+            if not text or not text.strip():
+                logger.warning("Пустой ответ для диалога %s", dialog_id)
                 text = "Нет ответа."
             else:
                 text = text.strip()
-                
+
             if text == "Нет ответа." and attempt < OPENAI_RETRY_COUNT - 1:
                 logger.warning("Получен 'Нет ответа.', повторяем (попытка %d/%d)", attempt + 1, OPENAI_RETRY_COUNT)
+                # Убираем последнее сообщение пользователя перед повтором
+                history.pop()
                 await asyncio.sleep(2)
                 continue
 
-            logger.info("Получен ответ для диалога %s: %s", dialog_id, text)
+            # Добавляем ответ ассистента в историю
+            history.append({"role": "assistant", "content": text})
+
+            logger.info("Получен ответ для диалога %s: %s", dialog_id, text[:100])
             return text
         except Exception as e:
             logger.error("Ошибка в chat_with_openai для диалога %s: %s", dialog_id, e)
+            # Убираем последнее сообщение пользователя при ошибке
+            if history and history[-1]["role"] == "user":
+                history.pop()
             return f"Ошибка: {e}"
 
 async def reconnect_if_disconnected(client):
@@ -217,30 +358,33 @@ async def process_dialogue(dialog, client, processed):
         else:
             logger.info("Промпт НЕ обновлен для диалога %s с пользователем '%s' - используем текущий", dialog_id, user_name)
 
-        # Создаём новый conversation для каждого диалога
+        # Создаём новую историю для каждого диалога
         try:
             key = _dialog_key(me.id, dialog_id)
-            if key in conversations_cache:
-                del conversations_cache[key]
-            logger.info("Очищен кэш conversation для диалога %s", dialog_id)
+            if key in conversations_history:
+                del conversations_history[key]
+            logger.info("Очищена история для диалога %s", dialog_id)
         except Exception as e:
-            logger.warning("Не удалось очистить кэш conversation для диалога %s: %s", dialog_id, e)
+            logger.warning("Не удалось очистить историю для диалога %s: %s", dialog_id, e)
 
         # Проверка соединения перед обработкой
         await reconnect_if_disconnected(client)
 
-        # --- Добавлено: ответ на первое нетекстовое сообщение ---
+        # --- Проверка первого сообщения: для НЕ-фото отправляем NON_TEXT_REPLY ---
         try:
             recent = await client.client.get_messages(dialog_id, limit=1)
             if recent:
                 m0 = recent[0]
                 # Проверяем, что сообщение не от нас, не текстовое и не системное
                 if m0.sender_id != me.id and not m0.text and not is_system_message(m0):
-                    await client.client.send_message(dialog_id, NON_TEXT_REPLY)
-                    logger.info("Ответ на не-текстовое сообщение пользователю '%s'", user_name)
+                    # Если это НЕ фото (голосовое, видео, стикер и т.д.) - сразу отправляем NON_TEXT_REPLY
+                    if not m0.photo:
+                        await client.client.send_message(dialog_id, NON_TEXT_REPLY)
+                        logger.info("Ответ на не-текстовое сообщение (не фото) пользователю '%s'", user_name)
+                    # Если это фото - ничего не делаем здесь, OCR будет в основном цикле
         except Exception as e:
             logger.error("Ошибка при проверке нетекстовых сообщений: %s", e)
-        # --- Конец добавления ---
+        # --- Конец проверки ---
 
         # Отправляем приветствие, если переменная SEND_DELAYED установлена в '1'
         if SEND_DELAYED == 1:
@@ -276,20 +420,38 @@ async def process_dialogue(dialog, client, processed):
             logger.error("Ошибка получения сообщений для начальной обработки диалога с '%s': %s", user_name, e)
             msgs = []
 
-        # Отбираем текстовые сообщения, отправленные клиентом (исключаем системные сообщения)
-        initial_client_msgs = [m for m in msgs if m.sender_id != me.id and m.text and not is_system_message(m)]
+        initial_client_msgs = []
+        for m in msgs:
+            if m.sender_id != me.id and not is_system_message(m):
+                text_content = None
+
+                # Сначала проверяем обычный текст
+                if m.text:
+                    processed = process_text_with_map_links(m.text)
+                    text_content = processed if processed else m.text
+                # Если нет текста, пробуем OCR для фото
+                elif m.photo:
+                    ocr_text = await extract_text_from_image(client.client, m)
+                    if ocr_text:
+                        text_content = f"[Текст с изображения]: {ocr_text}"
+
+                # Добавляем сообщение только если есть текстовый контент
+                if text_content:
+                    initial_client_msgs.append((m, text_content))
+
         if initial_client_msgs:
-            initial_client_msgs.sort(key=lambda m: m.date)
-            combined = "\n".join(m.text for m in initial_client_msgs)
+            initial_client_msgs.sort(key=lambda item: item[0].date)
+            combined = "\n".join(item[1] for item in initial_client_msgs)
             reply = await chat_with_openai(me.id, dialog_id, combined)
             try:
                 await client.client.send_message(dialog_id, reply, parse_mode="markdown")
                 logger.info("Отправлено начальное сообщение пользователю '%s'", user_name)
             except Exception as e:
                 logger.error("Ошибка отправки начального сообщения пользователю '%s': %s", user_name, e)
-            last_time = (initial_client_msgs[-1].date
-                         if initial_client_msgs[-1].date.tzinfo
-                         else initial_client_msgs[-1].date.replace(tzinfo=timezone.utc))
+            last_msg = initial_client_msgs[-1][0]
+            last_time = (last_msg.date
+                         if last_msg.date.tzinfo
+                         else last_msg.date.replace(tzinfo=timezone.utc))
         else:
             last_time = datetime.now(timezone.utc)
 
@@ -302,40 +464,55 @@ async def process_dialogue(dialog, client, processed):
                 logger.error("Ошибка получения сообщений для диалога с '%s': %s", user_name, e)
                 continue
 
-            new_text_msgs = []
+            new_msgs_with_text = []
             non_text_replied = False
             for m in msgs:
                 msg_time = m.date if m.date.tzinfo else m.date.replace(tzinfo=timezone.utc)
                 if m.sender_id == me.id or msg_time <= last_time:
                     continue
-                
+
                 # Пропускаем системные сообщения (joined telegram, и т.д.)
                 if is_system_message(m):
                     logger.info("Пропущено системное сообщение для пользователя '%s'", user_name)
                     continue
 
-                if not m.text and not non_text_replied:
+                text_content = None
+
+                # Сначала проверяем обычный текст
+                if m.text:
+                    processed = process_text_with_map_links(m.text)
+                    text_content = processed if processed else m.text
+                # Если нет текста, пробуем OCR для фото
+                elif m.photo:
+                    ocr_text = await extract_text_from_image(client.client, m)
+                    if ocr_text:
+                        text_content = f"[Текст с изображения]: {ocr_text}"
+
+                # Если есть текстовый контент, добавляем сообщение
+                if text_content:
+                    new_msgs_with_text.append((m, text_content))
+                elif not non_text_replied:
+                    # Это не текст и не удалось распознать - отправляем стандартный ответ
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)
                     logger.info("Ответ на не-текстовое сообщение в цикле пользователю '%s'", user_name)
                     last_time = msg_time
                     non_text_replied = True
                     continue
 
-                new_text_msgs.append(m)
-
-            logger.info("Для пользователя '%s' найдено %d новых текстовых сообщений", user_name, len(new_text_msgs))
-            if new_text_msgs:
-                new_text_msgs.sort(key=lambda m: m.date)
-                combined = "\n".join(m.text for m in new_text_msgs)
+            logger.info("Для пользователя '%s' найдено %d новых текстовых сообщений/локаций", user_name, len(new_msgs_with_text))
+            if new_msgs_with_text:
+                new_msgs_with_text.sort(key=lambda item: item[0].date)
+                combined = "\n".join(item[1] for item in new_msgs_with_text)
                 reply = await chat_with_openai(me.id, dialog_id, combined)
                 try:
                     await client.client.send_message(dialog_id, reply, parse_mode="markdown")
                     logger.info("Отправлено сообщение пользователю '%s'", user_name)
                 except Exception as e:
                     logger.error("Ошибка отправки сообщения пользователю '%s': %s", user_name, e)
-                last_time = (new_text_msgs[-1].date
-                             if new_text_msgs[-1].date.tzinfo
-                             else new_text_msgs[-1].date.replace(tzinfo=timezone.utc))
+                last_msg = new_msgs_with_text[-1][0]
+                last_time = (last_msg.date
+                             if last_msg.date.tzinfo
+                             else last_msg.date.replace(tzinfo=timezone.utc))
             else:
                 logger.info("За этот период для пользователя '%s' новых текстовых сообщений не обнаружено", user_name)
 

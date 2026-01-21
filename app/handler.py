@@ -3,8 +3,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from urllib.parse import urlparse, parse_qs, unquote
 from io import BytesIO
-import pytesseract
-from PIL import Image
+import base64
 
 load_dotenv()
 
@@ -195,12 +194,12 @@ def process_text_with_map_links(text):
     return processed if found else None
 
 
-async def extract_text_from_image(client, message):
+async def extract_text_from_image(telegram_client, message):
     """
-    Извлекает текст из изображения в сообщении с помощью Tesseract OCR
+    Извлекает текст из изображения с помощью OpenAI Vision API
 
     Args:
-        client: Telegram клиент
+        telegram_client: Telegram клиент
         message: Сообщение Telegram с фото
 
     Returns:
@@ -210,62 +209,53 @@ async def extract_text_from_image(client, message):
         if not message.photo:
             return None
 
-        logger.info("Начинаем распознавание текста с изображения из сообщения %s", message.id)
+        logger.info("Начинаем распознавание текста с изображения из сообщения %s через OpenAI Vision", message.id)
 
         # Скачиваем фото в память
-        photo_bytes = await client.download_media(message.photo, file=BytesIO())
+        photo_bytes = await telegram_client.download_media(message.photo, file=BytesIO())
 
         if not photo_bytes:
             logger.warning("Не удалось скачать фото из сообщения %s", message.id)
             return None
 
-        # Открываем изображение с помощью Pillow
+        # Конвертируем в base64
         photo_bytes.seek(0)
-        image = Image.open(photo_bytes)
+        base64_image = base64.b64encode(photo_bytes.read()).decode('utf-8')
 
-        # Улучшаем изображение для OCR
-        # Увеличиваем размер в 2 раза для лучшего распознавания мелкого текста
-        width, height = image.size
-        image = image.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
+        # Отправляем в OpenAI Vision API (используем глобальный OpenAI client)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Extract all visible text from this image. Return only the text content, no descriptions."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_completion_tokens=1000
+        )
 
-        # Конвертируем в оттенки серого
-        image = image.convert('L')
+        text = response.choices[0].message.content if response.choices else None
 
-        # Увеличиваем контраст
-        from PIL import ImageEnhance
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0)
-
-        # Увеличиваем резкость
-        sharpness = ImageEnhance.Sharpness(image)
-        image = sharpness.enhance(2.0)
-
-        # Пробуем распознать с разными конфигурациями
-        configs = [
-            '--psm 3',  # Полностью автоматическое разбиение страницы
-            '--psm 6',  # Блок единообразного текста
-            '--psm 11', # Разреженный текст
-            '--psm 12', # Разреженный текст с OSD
-        ]
-
-        best_text = ""
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(image, lang='rus+eng', config=config)
-                if text and len(text.strip()) > len(best_text):
-                    best_text = text.strip()
-            except:
-                continue
-
-        if best_text:
-            logger.info("Текст успешно распознан (длина: %d символов): %s", len(best_text), best_text[:100])
-            return best_text
+        if text and text.strip():
+            logger.info("Текст успешно распознан через OpenAI Vision (длина: %d символов): %s", len(text.strip()), text.strip()[:100])
+            return text.strip()
         else:
             logger.info("На изображении текст не обнаружен")
             return None
 
     except Exception as e:
-        logger.error("Ошибка при распознавании текста с изображения: %s", e)
+        logger.error("Ошибка при распознавании текста с изображения через OpenAI Vision: %s", e)
         return None
 
 

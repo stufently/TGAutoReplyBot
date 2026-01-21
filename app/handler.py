@@ -413,21 +413,22 @@ async def process_dialogue(dialog, client, processed):
         initial_client_msgs = []
         for m in msgs:
             if m.sender_id != me.id and not is_system_message(m):
-                text_content = None
+                text_parts = []
 
-                # Сначала проверяем обычный текст
+                # Проверяем текст
                 if m.text:
                     processed = process_text_with_map_links(m.text)
-                    text_content = processed if processed else m.text
-                # Если нет текста, пробуем OCR для фото
-                elif m.photo:
+                    text_parts.append(processed if processed else m.text)
+
+                # Проверяем фото (даже если есть текст)
+                if m.photo:
                     ocr_text = await extract_text_from_image(client.client, m)
                     if ocr_text:
-                        text_content = f"[Текст с изображения]: {ocr_text}"
+                        text_parts.append(f"[Текст с изображения]: {ocr_text}")
 
-                # Добавляем сообщение только если есть текстовый контент
-                if text_content:
-                    initial_client_msgs.append((m, text_content))
+                # Добавляем сообщение если есть контент
+                if text_parts:
+                    initial_client_msgs.append((m, "\n".join(text_parts)))
 
         if initial_client_msgs:
             initial_client_msgs.sort(key=lambda item: item[0].date)
@@ -466,21 +467,22 @@ async def process_dialogue(dialog, client, processed):
                     logger.info("Пропущено системное сообщение для пользователя '%s'", user_name)
                     continue
 
-                text_content = None
+                text_parts = []
 
-                # Сначала проверяем обычный текст
+                # Проверяем текст
                 if m.text:
                     processed = process_text_with_map_links(m.text)
-                    text_content = processed if processed else m.text
-                # Если нет текста, пробуем OCR для фото
-                elif m.photo:
+                    text_parts.append(processed if processed else m.text)
+
+                # Проверяем фото (даже если есть текст)
+                if m.photo:
                     ocr_text = await extract_text_from_image(client.client, m)
                     if ocr_text:
-                        text_content = f"[Текст с изображения]: {ocr_text}"
+                        text_parts.append(f"[Текст с изображения]: {ocr_text}")
 
-                # Если есть текстовый контент, добавляем сообщение
-                if text_content:
-                    new_msgs_with_text.append((m, text_content))
+                # Если есть контент, добавляем сообщение
+                if text_parts:
+                    new_msgs_with_text.append((m, "\n".join(text_parts)))
                 elif not non_text_replied:
                     # Это не текст и не удалось распознать - отправляем стандартный ответ
                     await client.client.send_message(dialog_id, NON_TEXT_REPLY)

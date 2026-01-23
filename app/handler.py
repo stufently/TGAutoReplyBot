@@ -37,6 +37,7 @@ SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "sessions/autoreply_prompt.
 PROMPT_URL = os.getenv("PROMPT_URL", "https://our-promts.fsn1.your-objectstorage.com/prompts/link.txt")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "5120"))
 OPENAI_RETRY_COUNT = int(os.getenv("OPENAI_RETRY_COUNT", "3"))
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Настройка логгера
@@ -259,6 +260,63 @@ async def extract_text_from_image(telegram_client, message):
         return None
 
 
+async def transcribe_voice_message(telegram_client, message):
+    """
+    Распознаёт голосовое сообщение через OpenAI Audio Transcriptions API (gpt-4o-mini-transcribe).
+
+    Args:
+        telegram_client: Telegram клиент (Telethon)
+        message: Сообщение Telegram с voice или audio
+
+    Returns:
+        str: Распознанный текст или None при ошибке
+    """
+    try:
+        voice = getattr(message, 'voice', None) or getattr(message, 'audio', None)
+        if not voice and hasattr(message, 'media'):
+            media_type = type(message.media).__name__
+            if 'Audio' in media_type or 'Voice' in media_type or 'Document' in media_type:
+                voice = message.media
+        if not voice:
+            return None
+
+        logger.info("Начинаем распознавание голосового сообщения %s", message.id)
+
+        # Скачиваем аудио в память
+        audio_buffer = BytesIO()
+        await telegram_client.download_media(message, file=audio_buffer)
+        audio_buffer.seek(0)
+
+        if audio_buffer.getbuffer().nbytes == 0:
+            logger.warning("Не удалось скачать голосовое сообщение %s", message.id)
+            return None
+
+        # Устанавливаем имя файла для OpenAI API
+        audio_buffer.name = "voice.ogg"
+
+        # Отправляем в OpenAI Audio Transcriptions API
+        transcription = client.audio.transcriptions.create(
+            model=OPENAI_TRANSCRIBE_MODEL,
+            file=audio_buffer,
+            language="ru",
+            response_format="json",
+            temperature=0,
+        )
+
+        text = transcription.text if transcription else None
+
+        if text and text.strip():
+            logger.info("Голосовое сообщение %s распознано (длина: %d): %s", message.id, len(text.strip()), text.strip()[:100])
+            return text.strip()
+        else:
+            logger.info("Голосовое сообщение %s не содержит распознаваемой речи", message.id)
+            return None
+
+    except Exception as e:
+        logger.error("Ошибка при распознавании голосового сообщения %s: %s", message.id, e)
+        return None
+
+
 # Хранилище истории сообщений для каждого диалога
 conversations_history = {}
 
@@ -367,10 +425,11 @@ async def process_dialogue(dialog, client, processed):
                 m0 = recent[0]
                 # Проверяем, что сообщение не от нас, не текстовое и не системное
                 if m0.sender_id != me.id and not m0.text and not is_system_message(m0):
-                    # Если это НЕ фото (голосовое, видео, стикер и т.д.) - сразу отправляем NON_TEXT_REPLY
-                    if not m0.photo:
+                    # Если это НЕ фото и НЕ голосовое (видео, стикер и т.д.) - сразу отправляем NON_TEXT_REPLY
+                    has_voice = getattr(m0, 'voice', None) or getattr(m0, 'audio', None)
+                    if not m0.photo and not has_voice:
                         await client.client.send_message(dialog_id, NON_TEXT_REPLY)
-                        logger.info("Ответ на не-текстовое сообщение (не фото) пользователю '%s'", user_name)
+                        logger.info("Ответ на не-текстовое сообщение (не фото, не голосовое) пользователю '%s'", user_name)
                     # Если это фото - ничего не делаем здесь, OCR будет в основном цикле
         except Exception as e:
             logger.error("Ошибка при проверке нетекстовых сообщений: %s", e)
@@ -426,6 +485,12 @@ async def process_dialogue(dialog, client, processed):
                     if ocr_text:
                         text_parts.append(f"[Текст с изображения]: {ocr_text}")
 
+                # Проверяем голосовое/аудио сообщение
+                if getattr(m, 'voice', None) or getattr(m, 'audio', None):
+                    voice_text = await transcribe_voice_message(client.client, m)
+                    if voice_text:
+                        text_parts.append(f"[Голосовое сообщение]: {voice_text}")
+
                 # Добавляем сообщение если есть контент
                 if text_parts:
                     initial_client_msgs.append((m, "\n".join(text_parts)))
@@ -479,6 +544,12 @@ async def process_dialogue(dialog, client, processed):
                     ocr_text = await extract_text_from_image(client.client, m)
                     if ocr_text:
                         text_parts.append(f"[Текст с изображения]: {ocr_text}")
+
+                # Проверяем голосовое/аудио сообщение
+                if getattr(m, 'voice', None) or getattr(m, 'audio', None):
+                    voice_text = await transcribe_voice_message(client.client, m)
+                    if voice_text:
+                        text_parts.append(f"[Голосовое сообщение]: {voice_text}")
 
                 # Если есть контент, добавляем сообщение
                 if text_parts:

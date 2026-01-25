@@ -116,6 +116,27 @@ class dotdict(dict):
 
 
 
+async def get_address_from_geo(lat, lon):
+    """
+    Получает адрес по координатам через Nominatim (OpenStreetMap) — без API-ключа.
+    """
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&accept-language=ru"
+        headers = {"User-Agent": "TelegramBot/1.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        address = data.get("display_name")
+        if address:
+            logger.info("Геокодирование: %s, %s -> %s", lat, lon, address)
+            return address
+        logger.warning("Nominatim не вернул адрес для координат %s, %s", lat, lon)
+        return None
+    except Exception as e:
+        logger.error("Ошибка геокодирования для %s, %s: %s", lat, lon, e)
+        return None
+
+
 def extract_map_links(text):
     if not text:
         return []
@@ -425,12 +446,11 @@ async def process_dialogue(dialog, client, processed):
                 m0 = recent[0]
                 # Проверяем, что сообщение не от нас, не текстовое и не системное
                 if m0.sender_id != me.id and not m0.text and not is_system_message(m0):
-                    # Если это НЕ фото и НЕ голосовое (видео, стикер и т.д.) - сразу отправляем NON_TEXT_REPLY
+                    # Если это НЕ фото, НЕ голосовое и НЕ гео - сразу отправляем NON_TEXT_REPLY
                     has_voice = getattr(m0, 'voice', None) or getattr(m0, 'audio', None)
-                    if not m0.photo and not has_voice:
+                    if not m0.photo and not has_voice and not m0.geo:
                         await client.client.send_message(dialog_id, NON_TEXT_REPLY)
-                        logger.info("Ответ на не-текстовое сообщение (не фото, не голосовое) пользователю '%s'", user_name)
-                    # Если это фото - ничего не делаем здесь, OCR будет в основном цикле
+                        logger.info("Ответ на не-текстовое сообщение (не фото, не голосовое, не гео) пользователю '%s'", user_name)
         except Exception as e:
             logger.error("Ошибка при проверке нетекстовых сообщений: %s", e)
         # --- Конец проверки ---
@@ -478,6 +498,14 @@ async def process_dialogue(dialog, client, processed):
                 if m.text:
                     processed = process_text_with_map_links(m.text)
                     text_parts.append(processed if processed else m.text)
+
+                # Проверяем геолокацию
+                if m.geo:
+                    geo_address = await get_address_from_geo(m.geo.lat, m.geo.long)
+                    if geo_address:
+                        text_parts.append(f"[Геолокация: {geo_address}]")
+                    else:
+                        text_parts.append(f"[Геолокация: {m.geo.lat}, {m.geo.long}]")
 
                 # Проверяем фото (даже если есть текст)
                 if m.photo:
@@ -538,6 +566,14 @@ async def process_dialogue(dialog, client, processed):
                 if m.text:
                     processed = process_text_with_map_links(m.text)
                     text_parts.append(processed if processed else m.text)
+
+                # Проверяем геолокацию
+                if m.geo:
+                    geo_address = await get_address_from_geo(m.geo.lat, m.geo.long)
+                    if geo_address:
+                        text_parts.append(f"[Геолокация: {geo_address}]")
+                    else:
+                        text_parts.append(f"[Геолокация: {m.geo.lat}, {m.geo.long}]")
 
                 # Проверяем фото (даже если есть текст)
                 if m.photo:
